@@ -1,16 +1,19 @@
 #pragma once
 
 #include <cstddef>
-#include <cstdint>
 #include <vector>
 #include "MaskedOcclusionCulling.h"
 
-// Conservative inverse-visibility buffer. Unlike RenderTriangles(), this class
-// does not write MOC's occluder buffer: submitted triangles open coverage in a
-// separate buffer, which is suitable for empty-space rasterization.
+// Empty-space coverage buffer backed by a dedicated MOC instance. Since this
+// instance receives only empty-cell geometry, MOC's normal reversed-depth
+// update is exactly the desired max(1/w) open-space operation.
 class OpenSpaceRasterizer {
 public:
     OpenSpaceRasterizer(unsigned width, unsigned height);
+    ~OpenSpaceRasterizer();
+
+    OpenSpaceRasterizer(const OpenSpaceRasterizer&) = delete;
+    OpenSpaceRasterizer& operator=(const OpenSpaceRasterizer&) = delete;
 
     void ClearBuffer();
 
@@ -22,7 +25,6 @@ public:
         const MaskedOcclusionCulling::VertexLayout& vtxLayout =
             MaskedOcclusionCulling::VertexLayout(16, 4, 12));
 
-    // Returns true when at least one open sample overlaps the NDC rectangle.
     bool TestRect(float xmin, float ymin, float xmax, float ymax, float wmin) const;
 
     unsigned width() const { return width_; }
@@ -30,13 +32,9 @@ public:
     const std::vector<float>& depth() const { return openDepth_; }
 
 private:
-    struct Vertex { float x, y, z, w; };
-    void readVertex(const float* base, unsigned index,
-                    const float* matrix,
-                    const MaskedOcclusionCulling::VertexLayout& layout,
-                    Vertex& out) const;
-    void rasterizeTriangle(const Vertex& a, const Vertex& b, const Vertex& c);
+    void readDepth();
 
+    MaskedOcclusionCulling* moc_;
     unsigned width_;
     unsigned height_;
     std::vector<float> openDepth_;
