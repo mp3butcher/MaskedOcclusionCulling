@@ -1,5 +1,6 @@
-# Add the coverage-oriented wrapper to the library target.
-# It reuses MOC's existing SIMD triangle setup/rasterization through RenderTriangles
-# and keeps the normal occlusion-buffer API unchanged.
+#
+# Open-space rasterizer source files.
+#
+# Include this list in MOC_FILES below; it intentionally does not replace the
+# normal MaskedOcclusionCulling implementation.
 set(MOC_OPEN_SPACE_FILES OpenSpaceRasterizer.cpp OpenSpaceRasterizer.h)
-set(MOC_FILES ${MOC_FILES} ${MOC_OPEN_SPACE_FILES})
