@@ -347,7 +347,7 @@ public:
         const float *modelToClipMatrix = nullptr,
         BackfaceWinding bfWinding = BACKFACE_CW,
         ClipPlanes clipPlaneMask = CLIP_PLANE_ALL,
-        const VertexLayout &vtxLayout = VertexLayout(16, 4, 12));
+        const VertexLayout &vtxLayout = VertexLayout(16, 4, 12)) = 0;
 
 	/*! 
 	 * \brief Renders a mesh of occluder triangles and updates the hierarchical z buffer
