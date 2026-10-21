@@ -325,10 +325,29 @@ public:
 	 */
 	virtual void ClearBuffer() = 0;
 
-	/*!
-	* \brief Merge a second hierarchical depth buffer into the main buffer.
-	*/
-	virtual void MergeBuffer(MaskedOcclusionCulling* BufferB) = 0;
+    /*!
+     * \brief Clears the packed 1-bit mask buffer used by the depth-tested mask rasterizer.
+     */
+    virtual void Clear1BitMaskBuffer() = 0;
+
+    /*!
+    * \brief Merge a second hierarchical depth buffer into the main buffer.
+    */
+    virtual void MergeBuffer(MaskedOcclusionCulling* BufferB) = 0;
+
+    /*!
+     * \brief Rasterizes all triangles into a packed 1-bit mask while testing each
+     *        fragment against the current depth buffer. Depth semantics use the
+     *        library's reversed-Z convention: a fragment passes if zFrag >= zStored.
+     */
+    virtual void  RenderTrianglesTo1BitMask(
+        const float *inVtx,
+        const unsigned int *inTris,
+        int nTris,
+        const float *modelToClipMatrix = nullptr,
+        BackfaceWinding bfWinding = BACKFACE_CW,
+        ClipPlanes clipPlaneMask = CLIP_PLANE_ALL,
+        const VertexLayout &vtxLayout = VertexLayout(16, 4, 12));
 
 	/*! 
 	 * \brief Renders a mesh of occluder triangles and updates the hierarchical z buffer

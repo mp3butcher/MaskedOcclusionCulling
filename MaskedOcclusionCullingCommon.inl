@@ -141,12 +141,18 @@ public:
 
 	ZTile           *mMaskedHiZBuffer;
 	ScissorRect     mFullscreenScissor;
-
+        // Packed 1-bit mask buffer
+        static_assert(sizeof(unsigned int)==4,"unsigned int shoudl be 32 bits ");
+        unsigned int *m1BitMaskBuffer;
+        unsigned int m1BitMaskWords;
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 	// Constructors and state handling
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-	MaskedOcclusionCullingPrivate(pfnAlignedAlloc alignedAlloc, pfnAlignedFree alignedFree) : mFullscreenScissor(0, 0, 0, 0)
+	MaskedOcclusionCullingPrivate(pfnAlignedAlloc alignedAlloc, pfnAlignedFree alignedFree) : 
+	mFullscreenScissor(0, 0, 0, 0),
+        m1BitMaskBuffer(nullptr),
+        m1BitMaskWords(0)
 	{
 		mMaskedHiZBuffer = nullptr;
 		mAlignedAllocCallback = alignedAlloc;
@@ -178,57 +184,100 @@ public:
 #endif
 	}
 
-	void SetResolution(unsigned int width, unsigned int height) override
-	{
-		// Resolution must be a multiple of the subtile size
-		assert(width % SUB_TILE_WIDTH == 0 && height % SUB_TILE_HEIGHT == 0);
-#if PRECISE_COVERAGE == 0
-		// Test if combination of resolution & SLOPE_FP_BITS bits may cause 32-bit overflow. Note that the maximum resolution estimate
-		// is only an estimate (not conservative). It's advicable to stay well below the limit.
-		assert(width < ((1U << 31) - 1U) / ((1U << FP_BITS) * (TILE_HEIGHT + (unsigned int)(GUARD_BAND_PIXEL_SIZE + 1.0f))) - (2U * (unsigned int)(GUARD_BAND_PIXEL_SIZE + 1.0f)));
-#endif
+	FORCE_INLINE static void Set1BitMaskPixel(unsigned int *mask, unsigned int x, unsigned int y, unsigned int width)
+    {
+        if (!mask || x >= width)
+            return;
+        const unsigned int idx = (unsigned int)y * width + x;
+        mask[idx >> 5] |= (1u << (idx & 31u));
+    }
 
-		// Delete current masked hierarchical Z buffer
-		if (mMaskedHiZBuffer != nullptr)
-			mAlignedFreeCallback(mMaskedHiZBuffer);
-		mMaskedHiZBuffer = nullptr;
+        // FORCE_INLINE static bool Test1BitMaskPixel(const uint32_t *mask, unsigned int x, unsigned int y, unsigned int width)
+        // {
+        //     if (!mask || x >= width)
+        //         return false;
+        //     const unsigned int idx = (unsigned int)y * width + x;
+        //     return (mask[idx >> 5] & (1u << (idx & 31u))) != 0u;
+        // }
 
-		// Setup various resolution dependent constant values
-		mWidth = (int)width;
-		mHeight = (int)height;
-		mTilesWidth = (int)(width + TILE_WIDTH - 1) >> TILE_WIDTH_SHIFT;
-		mTilesHeight = (int)(height + TILE_HEIGHT - 1) >> TILE_HEIGHT_SHIFT;
-		mCenterX = _mmw_set1_ps((float)mWidth  * 0.5f);
-		mCenterY = _mmw_set1_ps((float)mHeight * 0.5f);
-		mICenter = _mm_setr_ps((float)mWidth * 0.5f, (float)mWidth * 0.5f, (float)mHeight * 0.5f, (float)mHeight * 0.5f);
-		mHalfWidth = _mmw_set1_ps((float)mWidth  * 0.5f);
-#if USE_D3D != 0
-		mHalfHeight = _mmw_set1_ps((float)-mHeight * 0.5f);
-		mIHalfSize = _mm_setr_ps((float)mWidth * 0.5f, (float)mWidth * 0.5f, (float)-mHeight * 0.5f, (float)-mHeight * 0.5f);
-#else
-		mHalfHeight = _mmw_set1_ps((float)mHeight * 0.5f);
-		mIHalfSize = _mm_setr_ps((float)mWidth * 0.5f, (float)mWidth * 0.5f, (float)mHeight * 0.5f, (float)mHeight * 0.5f);
-#endif
-		mIScreenSize = _mm_setr_epi32(mWidth - 1, mWidth - 1, mHeight - 1, mHeight - 1);
+        FORCE_INLINE static bool TestMaskBit(const unsigned int *mask, unsigned int x, unsigned int y, unsigned int width, unsigned int height)
+        {
+            if (!mask || x >= width || y >= height)
+                return false;
 
-		// Setup a full screen scissor rectangle
-		mFullscreenScissor.mMinX = 0;
-		mFullscreenScissor.mMinY = 0;
-		mFullscreenScissor.mMaxX = mTilesWidth << TILE_WIDTH_SHIFT;
-		mFullscreenScissor.mMaxY = mTilesHeight << TILE_HEIGHT_SHIFT;
+            const unsigned int idx = y * width + x;
+            return (mask[idx >> 5] & (1u << (idx & 31u))) != 0u;
+        }
+        // Clears the packed 1-bit mask buffer.
+        void Clear1BitMaskBuffer() override
+        {
+            if (!m1BitMaskBuffer)
+                return;
 
-		// Adjust clip planes to include a small guard band to avoid clipping leaks
-		float guardBandWidth = (2.0f / (float)mWidth) * GUARD_BAND_PIXEL_SIZE;
-		float guardBandHeight = (2.0f / (float)mHeight) * GUARD_BAND_PIXEL_SIZE;
-		mCSFrustumPlanes[1] = _mm_setr_ps(1.0f - guardBandWidth, 0.0f, 1.0f, 0.0f);
-		mCSFrustumPlanes[2] = _mm_setr_ps(-1.0f + guardBandWidth, 0.0f, 1.0f, 0.0f);
-		mCSFrustumPlanes[3] = _mm_setr_ps(0.0f, 1.0f - guardBandHeight, 1.0f, 0.0f);
-		mCSFrustumPlanes[4] = _mm_setr_ps(0.0f, -1.0f + guardBandHeight, 1.0f, 0.0f);
+            const size_t bytes = (size_t)m1BitMaskWords * sizeof(unsigned int);
+            memset(m1BitMaskBuffer, 0, bytes);
+        }
 
-		// Allocate masked hierarchical Z buffer (if zero size leave at nullptr)
-		if(mTilesWidth * mTilesHeight > 0)
-			mMaskedHiZBuffer = (ZTile *)mAlignedAllocCallback(64, sizeof(ZTile) * mTilesWidth * mTilesHeight);
-	}
+        void SetResolution(unsigned int width, unsigned int height) override
+        {
+            // Resolution must be a multiple of the subtile size
+            assert(width % SUB_TILE_WIDTH == 0 && height % SUB_TILE_HEIGHT == 0);
+    #if PRECISE_COVERAGE == 0
+            // Test if combination of resolution & SLOPE_FP_BITS bits may cause 32-bit overflow. Note that the maximum resolution estimate
+            // is only an estimate (not conservative). It's advicable to stay well below the limit.
+            assert(width < ((1U << 31) - 1U) / ((1U << FP_BITS) * (TILE_HEIGHT + (unsigned int)(GUARD_BAND_PIXEL_SIZE + 1.0f))) - (2U * (unsigned int)(GUARD_BAND_PIXEL_SIZE + 1.0f)));
+    #endif
+
+            // Delete current masked hierarchical Z buffer
+            if (mMaskedHiZBuffer != nullptr)
+                mAlignedFreeCallback(mMaskedHiZBuffer);
+            mMaskedHiZBuffer = nullptr;
+
+            // Setup various resolution dependent constant values
+            mWidth = (int)width;
+            mHeight = (int)height;
+            mTilesWidth = (int)(width + TILE_WIDTH - 1) >> TILE_WIDTH_SHIFT;
+            mTilesHeight = (int)(height + TILE_HEIGHT - 1) >> TILE_HEIGHT_SHIFT;
+            mCenterX = _mmw_set1_ps((float)mWidth  * 0.5f);
+            mCenterY = _mmw_set1_ps((float)mHeight * 0.5f);
+            mICenter = _mm_setr_ps((float)mWidth * 0.5f, (float)mWidth * 0.5f, (float)mHeight * 0.5f, (float)mHeight * 0.5f);
+            mHalfWidth = _mmw_set1_ps((float)mWidth  * 0.5f);
+    #if USE_D3D != 0
+            mHalfHeight = _mmw_set1_ps((float)-mHeight * 0.5f);
+            mIHalfSize = _mm_setr_ps((float)mWidth * 0.5f, (float)mWidth * 0.5f, (float)-mHeight * 0.5f, (float)-mHeight * 0.5f);
+    #else
+            mHalfHeight = _mmw_set1_ps((float)mHeight * 0.5f);
+            mIHalfSize = _mm_setr_ps((float)mWidth * 0.5f, (float)mWidth * 0.5f, (float)mHeight * 0.5f, (float)mHeight * 0.5f);
+    #endif
+            mIScreenSize = _mm_setr_epi32(mWidth - 1, mWidth - 1, mHeight - 1, mHeight - 1);
+
+            // Setup a full screen scissor rectangle
+            mFullscreenScissor.mMinX = 0;
+            mFullscreenScissor.mMinY = 0;
+            mFullscreenScissor.mMaxX = mTilesWidth << TILE_WIDTH_SHIFT;
+            mFullscreenScissor.mMaxY = mTilesHeight << TILE_HEIGHT_SHIFT;
+
+            // Adjust clip planes to include a small guard band to avoid clipping leaks
+            float guardBandWidth = (2.0f / (float)mWidth) * GUARD_BAND_PIXEL_SIZE;
+            float guardBandHeight = (2.0f / (float)mHeight) * GUARD_BAND_PIXEL_SIZE;
+            mCSFrustumPlanes[1] = _mm_setr_ps(1.0f - guardBandWidth, 0.0f, 1.0f, 0.0f);
+            mCSFrustumPlanes[2] = _mm_setr_ps(-1.0f + guardBandWidth, 0.0f, 1.0f, 0.0f);
+            mCSFrustumPlanes[3] = _mm_setr_ps(0.0f, 1.0f - guardBandHeight, 1.0f, 0.0f);
+            mCSFrustumPlanes[4] = _mm_setr_ps(0.0f, -1.0f + guardBandHeight, 1.0f, 0.0f);
+
+            // Allocate masked hierarchical Z buffer (if zero size leave at nullptr)
+            if(mTilesWidth * mTilesHeight > 0)
+                mMaskedHiZBuffer = (ZTile *)mAlignedAllocCallback(64, sizeof(ZTile) * mTilesWidth * mTilesHeight);
+            const size_t maskWords = ((size_t)width * (size_t)height + 31u) >> 5;
+            if (m1BitMaskBuffer)
+                mAlignedFreeCallback(m1BitMaskBuffer);
+            // one bit mask
+            m1BitMaskBuffer = (unsigned int*)mAlignedAllocCallback(64, maskWords * sizeof(unsigned int));
+            m1BitMaskWidth = width;
+            m1BitMaskHeight = height;
+            m1BitMaskWords = (unsigned int)maskWords;
+            Clear1BitMaskBuffer();
+        }
 
 	void GetResolution(unsigned int &width, unsigned int &height) const override
 	{
@@ -283,6 +332,8 @@ public:
             if( mRecorder != nullptr ) mRecorder->RecordClearBuffer();
         }
 #endif
+
+        Clear1BitMaskBuffer();
 	}
 
 
@@ -779,7 +830,47 @@ public:
 		return ((bfWinding & BACKFACE_CCW) ? 0 : _mmw_movemask_ps(ccwMask)) | ((bfWinding & BACKFACE_CW) ? 0 : ~_mmw_movemask_ps(ccwMask));
 	}
 #endif
+        FORCE_INLINE bool IsSubtileMasked(int tileIdx, int lane) const
+        {
+            if (m1BitMaskBuffer == nullptr)
+                return false;
 
+            const int tileX = tileIdx % mTilesWidth;
+            const int tileY = tileIdx / mTilesWidth;
+            const int px = tileX * TILE_WIDTH + lane * SUB_TILE_WIDTH;
+            const int py = tileY * TILE_HEIGHT;
+
+            for (int y = 0; y < SUB_TILE_HEIGHT; ++y)
+            {
+                for (int x = 0; x < SUB_TILE_WIDTH; ++x)
+                {
+                    const int sx = px + x;
+                    const int sy = py + y;
+                    if (sx < 0 || sy < 0 || sx >= mWidth || sy >= mHeight)
+                        continue;
+
+                    const unsigned int idx = (unsigned int)sy * (unsigned int)mWidth + (unsigned int)sx;
+                    if ((m1BitMaskBuffer[idx >> 5] & (1u << (idx & 31u))) != 0u)
+                        return true;
+                }
+            }
+            return false;
+        }
+
+        FORCE_INLINE __mwi GetMaskedSubtileMask(int tileIdx) const
+        {
+            __mwi masked = _mmw_setzero_epi32();
+            if (m1BitMaskBuffer == nullptr)
+                return masked;
+
+            // Each SIMD lane corresponds to one 8x4 subtile in the current tile.
+            for (int lane = 0; lane < 4; ++lane)
+            {
+                if (IsSubtileMasked(tileIdx, lane))
+                    simd_i32(masked)[lane] = ~0U;
+            }
+            return masked;
+        }
 	FORCE_INLINE void ComputeDepthPlane(const __mw *pVtxX, const __mw *pVtxY, const __mw *pVtxZ, __mw &zPixelDx, __mw &zPixelDy) const
 	{
 		// Setup z(x,y) = z0 + dx*x + dy*y screen space depth plane equation
@@ -807,6 +898,12 @@ public:
 		// Swizzle coverage mask to 8x4 subtiles and test if any subtiles are not covered at all
 		__mwi rastMask = coverage;
 		__mwi deadLane = _mmw_cmpeq_epi32(rastMask, SIMD_BITS_ZERO);
+
+		// Reject any 8x4 subtile already marked in the 1-bit mask buffer.
+		// This is the critical "mask-before-depth-write" gate: if a subtile is already set,
+		// don't update that subtile's zMin / coverage.
+		__mwi maskedSubtileMask = GetMaskedSubtileMask(tileIdx);
+		deadLane = _mmw_or_epi32(deadLane, maskedSubtileMask);
 
 		// Mask out all subtiles failing the depth test (don't update these subtiles)
 		deadLane = _mmw_or_epi32(deadLane, _mmw_srai_epi32(simd_cast<__mwi>(_mmw_sub_ps(zTriv, zMin[0])), 31));
@@ -844,6 +941,10 @@ public:
 
 		// Swizzle coverage mask to 8x4 subtiles
 		__mwi rastMask = coverage;
+
+		// Reject subtiles already set in the 1-bit mask buffer before any depth write.
+		__mwi maskedSubtileMask = GetMaskedSubtileMask(tileIdx);
+		rastMask = _mmw_andnot_epi32(maskedSubtileMask, rastMask);
 
 		// Perform individual depth tests with layer 0 & 1 and mask out all failing pixels 
 		__mw sdist0 = _mmw_sub_ps(zMin[0], zTriv);
@@ -959,6 +1060,13 @@ public:
 
 					__mwi rastMask = _mmw_transpose_epi8(accumulatedMask);
 					__mwi deadLane = _mmw_cmpeq_epi32(rastMask, SIMD_BITS_ZERO);
+					// Remove already-masked subtiles before running the visibility test.
+					if (m1BitMaskBuffer)
+					{
+						__mwi maskedSubtileMask = GetMaskedSubtileMask(tileIdx);
+						rastMask = _mmw_andnot_epi32(maskedSubtileMask, rastMask);
+						deadLane = _mmw_or_epi32(deadLane, maskedSubtileMask);
+					}
 					zPass = _mmw_andnot_epi32(deadLane, zPass);
 
 					if (!_mmw_testz_epi32(zPass, zPass))
@@ -968,10 +1076,18 @@ public:
 				{
 					// Compute interpolated min for each 8x4 subtile and update the masked hierarchical z buffer entry
 					__mw zSubTileMin = _mmw_max_ps(z0, zTriMin);
+
+					// Remove already-masked subtiles before the depth write.
+					__mwi rastMask = _mmw_transpose_epi8(accumulatedMask);
+					if (m1BitMaskBuffer)
+					{
+						__mwi maskedSubtileMask = GetMaskedSubtileMask(tileIdx);
+						rastMask = _mmw_andnot_epi32(maskedSubtileMask, rastMask);
+					}
 #if QUICK_MASK != 0
-					UpdateTileQuick(tileIdx, _mmw_transpose_epi8(accumulatedMask), zSubTileMin);
+					UpdateTileQuick(tileIdx, rastMask, zSubTileMin);
 #else 
-					UpdateTileAccurate(tileIdx, _mmw_transpose_epi8(accumulatedMask), zSubTileMin);
+					UpdateTileAccurate(tileIdx, rastMask, zSubTileMin);
 #endif
 				}
 			}
