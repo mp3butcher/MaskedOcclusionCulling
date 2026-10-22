@@ -328,7 +328,7 @@ public:
     /*!
      * \brief Clears the packed 1-bit mask buffer used by the depth-tested mask rasterizer.
      */
-    virtual void Clear1BitMaskBuffer() = 0;
+    virtual void ClearPortalBuffer() = 0;
 
     /*!
     * \brief Merge a second hierarchical depth buffer into the main buffer.
@@ -340,7 +340,7 @@ public:
      *        fragment against the current depth buffer. Depth semantics use the
      *        library's reversed-Z convention: a fragment passes if zFrag >= zStored.
      */
-    virtual void  RenderTrianglesTo1BitMask(
+    virtual void  RenderTrianglesToPortalBuffer(
         const float *inVtx,
         const unsigned int *inTris,
         int nTris,
@@ -348,11 +348,13 @@ public:
         BackfaceWinding bfWinding = BACKFACE_CW,
         ClipPlanes clipPlaneMask = CLIP_PLANE_ALL,
         const VertexLayout &vtxLayout = VertexLayout(16, 4, 12)) = 0;
+    virtual bool TestRectAgainstPortalBuffer(float xmin, float ymin, float xmax, float ymax) const = 0;
 
     /*!
     * \brief return the 1 bit buffer mask
     */
-    virtual unsigned int * get1BitMask();
+    virtual void ComputePixelPortalBuffer(unsigned char *portalData, bool flipY) = 0;
+
 	/*! 
 	 * \brief Renders a mesh of occluder triangles and updates the hierarchical z buffer
 	 *        with conservative depth values.

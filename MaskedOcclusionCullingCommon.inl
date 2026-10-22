@@ -119,7 +119,12 @@ public:
 		__mw        mZMin[2];
 		__mwi       mMask;
 	};
+    struct PortalTile
+    {
+        __mwi mMask; // 4x8x4 subtile coverage mask for one tile
+    };
 
+    PortalTile *mPortalMaskBuffer;
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 	// Member variables
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -140,19 +145,15 @@ public:
 	int             mTilesHeight;
 
 	ZTile           *mMaskedHiZBuffer;
-	ScissorRect     mFullscreenScissor;
-    // Packed 1-bit mask buffer
-    static_assert(sizeof(unsigned int)==4,"unsigned int shoudl be 32 bits ");
-    unsigned int *m1BitMaskBuffer;
-    unsigned int m1BitMaskWords;
+    ScissorRect     mFullscreenScissor;
+
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 	// Constructors and state handling
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 	MaskedOcclusionCullingPrivate(pfnAlignedAlloc alignedAlloc, pfnAlignedFree alignedFree) : 
 	mFullscreenScissor(0, 0, 0, 0),
-        m1BitMaskBuffer(nullptr),
-        m1BitMaskWords(0)
+        mPortalMaskBuffer(nullptr)
 	{
 		mMaskedHiZBuffer = nullptr;
 		mAlignedAllocCallback = alignedAlloc;
@@ -179,44 +180,20 @@ public:
 			mAlignedFreeCallback(mMaskedHiZBuffer);
 		mMaskedHiZBuffer = nullptr;
 
+        if (mPortalMaskBuffer != nullptr)
+            mAlignedFreeCallback(mPortalMaskBuffer);
+        mPortalMaskBuffer = nullptr;
 #if MOC_RECORDER_ENABLE
         assert( mRecorder == nullptr ); // forgot to call StopRecording()?
 #endif
 	}
 
-	FORCE_INLINE static void Set1BitMaskPixel(unsigned int *mask, unsigned int x, unsigned int y, unsigned int width)
+    // Clears the 1-bit portal buffer.
+    void ClearPortalBuffer() override
     {
-        if (!mask || x >= width)
-            return;
-        const unsigned int idx = (unsigned int)y * width + x;
-        mask[idx >> 5] |= (1u << (idx & 31u));
+        for (int i = 0; i < mTilesWidth * mTilesHeight; ++i)
+            mPortalMaskBuffer[i].mMask = _mmw_setzero_epi32();
     }
-
-        // FORCE_INLINE static bool Test1BitMaskPixel(const uint32_t *mask, unsigned int x, unsigned int y, unsigned int width)
-        // {
-        //     if (!mask || x >= width)
-        //         return false;
-        //     const unsigned int idx = (unsigned int)y * width + x;
-        //     return (mask[idx >> 5] & (1u << (idx & 31u))) != 0u;
-        // }
-
-        FORCE_INLINE static bool TestMaskBit(const unsigned int *mask, unsigned int x, unsigned int y, unsigned int width, unsigned int height)
-        {
-            if (!mask || x >= width || y >= height)
-                return false;
-
-            const unsigned int idx = y * width + x;
-            return (mask[idx >> 5] & (1u << (idx & 31u))) != 0u;
-        }
-        // Clears the packed 1-bit mask buffer.
-        void Clear1BitMaskBuffer() override
-        {
-            if (!m1BitMaskBuffer)
-                return;
-
-            const size_t bytes = (size_t)m1BitMaskWords * sizeof(unsigned int);
-            memset(m1BitMaskBuffer, 0, bytes);
-        }
 
         void SetResolution(unsigned int width, unsigned int height) override
         {
@@ -268,14 +245,14 @@ public:
             // Allocate masked hierarchical Z buffer (if zero size leave at nullptr)
             if(mTilesWidth * mTilesHeight > 0)
                 mMaskedHiZBuffer = (ZTile *)mAlignedAllocCallback(64, sizeof(ZTile) * mTilesWidth * mTilesHeight);
-            const size_t maskWords = ((size_t)width * (size_t)height + 31u) >> 5;
-            if (m1BitMaskBuffer)
-                mAlignedFreeCallback(m1BitMaskBuffer);
-            // one bit mask
-            m1BitMaskBuffer = (unsigned int*)mAlignedAllocCallback(64, maskWords * sizeof(unsigned int));
 
-            m1BitMaskWords = (unsigned int)maskWords;
-            Clear1BitMaskBuffer();
+            if (mPortalMaskBuffer)
+                mAlignedFreeCallback(mPortalMaskBuffer);
+            mPortalMaskBuffer = (PortalTile *)mAlignedAllocCallback(64, sizeof(PortalTile) * mTilesWidth * mTilesHeight);
+
+            for (int i = 0; i < mTilesWidth * mTilesHeight; ++i)
+                mPortalMaskBuffer[i].mMask = _mmw_setzero_epi32();
+            ClearPortalBuffer();
         }
 
 	void GetResolution(unsigned int &width, unsigned int &height) const override
@@ -332,7 +309,7 @@ public:
         }
 #endif
 
-        Clear1BitMaskBuffer();
+        ClearPortalBuffer();
 	}
 
 
@@ -1550,77 +1527,125 @@ public:
 
 		return cullResult;
 	}
-    FORCE_INLINE void WriteVisibleSubtilesTo1BitMask(const __mwi &visibleMask, int tileIdx)
-    {
-        const int tileX = tileIdx % mTilesWidth;
-        const int tileY = tileIdx / mTilesWidth;
 
-        const int baseX = tileX * TILE_WIDTH;
-        const int baseY = tileY * TILE_HEIGHT;
+    FORCE_INLINE __mwi BuildRectCoverageMaskForTile(int tileX, int tileY, int rectMinX, int rectMinY, int rectMaxX, int rectMaxY) const
+    {
+        __mwi mask = _mmw_setzero_epi32();
 
         for (int lane = 0; lane < 4; ++lane)
         {
-            const unsigned int laneMask = simd_i32(visibleMask)[lane];
-            if (laneMask == 0)
-                continue;
+            const int sx = tileX * TILE_WIDTH + (lane % 4) * SUB_TILE_WIDTH;
+            const int sy = tileY * TILE_HEIGHT + (lane / 4) * SUB_TILE_HEIGHT;
 
-            const int sx = baseX + (lane % 4) * SUB_TILE_WIDTH;
-            const int sy = baseY + (lane / 4) * SUB_TILE_HEIGHT;
+            unsigned int  laneBits = 0;
 
             for (int row = 0; row < SUB_TILE_HEIGHT; ++row)
             {
-                const unsigned int rowMask = (laneMask >> (row * 8)) & 0xFFu;
-                if (rowMask == 0)
+                const int y = sy + row;
+                if (y < rectMinY || y > rectMaxY)
                     continue;
 
-                const int y = sy + row;
-                const int x0 = sx;
-
-                const unsigned int wordIndex = (unsigned int)(y * mWidth + x0) >> 5;
-                const unsigned int bitOffset = (unsigned int)(y * mWidth + x0) & 31u;
-
-                if (bitOffset <= 24u)
+                unsigned int  rowBits = 0;
+                for (int x = 0; x < SUB_TILE_WIDTH; ++x)
                 {
-                    // IMPORTANT: preserve previous mask bits
-                    m1BitMaskBuffer[wordIndex] |= (rowMask << bitOffset);
+                    const int px = sx + x;
+                    if (px >= rectMinX && px <= rectMaxX)
+                        rowBits |= (1u << x);
                 }
-                else
-                {
-                    // split across 32-bit boundary, still preserve previous bits
-                    m1BitMaskBuffer[wordIndex] |= (rowMask << bitOffset);
-                    m1BitMaskBuffer[wordIndex + 1] |= (rowMask >> (32u - bitOffset));
-                }
+
+                if (rowBits != 0u)
+                    laneBits |= (rowBits << (row * 8));
+            }
+
+            simd_i32(mask)[lane] = laneBits;
+        }
+
+        return mask;
+    }
+    FORCE_INLINE bool TestRectAgainstPortalBuffer(float xmin, float ymin, float xmax, float ymax) const override
+    {
+        if (mPortalMaskBuffer == nullptr)
+            return false;
+
+        // if (xmax < xmin)
+        //     std::swap(xmin, xmax);
+        // if (ymax < ymin)
+        //     std::swap(ymin, ymax);
+
+        // Convert NDC rect to screen-space pixel rect using the repo convention.
+        // This matches the same transform used in TestRect().
+#if USE_D3D != 0
+        __m128 pixelBBox = _mmx_fmadd_ps(_mm_setr_ps(xmin, xmax, ymax, ymin), mIHalfSize, mICenter);
+#else
+        __m128 pixelBBox = _mmx_fmadd_ps(_mm_setr_ps(xmin, xmax, ymin, ymax), mIHalfSize, mICenter);
+#endif
+
+        __m128i pixelBBoxi = _mm_cvttps_epi32(pixelBBox);
+        pixelBBoxi = _mmx_max_epi32(_mm_setzero_si128(), _mmx_min_epi32(mIScreenSize, pixelBBoxi));
+
+        const int minX = simd_i32(pixelBBoxi)[0];
+        const int maxX = simd_i32(pixelBBoxi)[1];
+        const int minY = simd_i32(pixelBBoxi)[2];
+        const int maxY = simd_i32(pixelBBoxi)[3];
+
+        // Clamp to screen
+        if (maxX < 0 || maxY < 0 || minX >= mWidth || minY >= mHeight)
+            return false;
+
+        const int clampedMinX = max(0, minX);
+        const int clampedMaxX = min(mWidth - 1, maxX);
+        const int clampedMinY = max(0, minY);
+        const int clampedMaxY = min(mHeight - 1, maxY);
+
+        const int txMin = clampedMinX / TILE_WIDTH;
+        const int txMax = clampedMaxX / TILE_WIDTH;
+        const int tyMin = clampedMinY / TILE_HEIGHT;
+        const int tyMax = clampedMaxY / TILE_HEIGHT;
+
+        for (int ty = tyMin; ty <= tyMax; ++ty)
+        {
+            for (int tx = txMin; tx <= txMax; ++tx)
+            {
+                const int tileIdx = ty * mTilesWidth + tx;
+
+                __mwi rectMask = BuildRectCoverageMaskForTile(tx, ty, clampedMinX, clampedMinY, clampedMaxX, clampedMaxY);
+                __mwi overlap = _mmw_and_epi32(rectMask, mPortalMaskBuffer[tileIdx].mMask);
+
+                if (!_mmw_testz_epi32(overlap, overlap))
+                    return true;
             }
         }
-    }
 
-    FORCE_INLINE unsigned int * get1BitMask() override { return m1BitMaskBuffer; }
-    FORCE_INLINE void RenderTrianglesTo1BitMask(
+        return false;
+    }
+    FORCE_INLINE void RenderTrianglesToPortalBuffer(
         const float *inVtx,
         const unsigned int *inTris,
         int nTris,
         const float *modelToClipMatrix,
         BackfaceWinding bfWinding,
         ClipPlanes clipPlaneMask,
-        const VertexLayout &vtxLayout)
+        const VertexLayout &vtxLayout) override
     {
         if (!inVtx || !inTris || nTris <= 0)
             return;
 
         int clipHead = 0;
         int clipTail = 0;
+        int lanes = SIMD_LANES;
         __m128 clipTriBuffer[MAX_CLIPPED * 3];
 
-        const unsigned int *inTrisPtr = inTris;
-        int numLanes = SIMD_LANES;
         int triIndex = 0;
         while (triIndex < nTris || clipHead != clipTail)
         {
             __mw vtxX[3], vtxY[3], vtxW[3];
             unsigned int triMask = SIMD_ALL_LANES_MASK;
 
-            GatherTransformClip<1>( clipHead, clipTail, numLanes, nTris, triIndex, vtxX, vtxY, vtxW, inVtx, inTrisPtr, vtxLayout, modelToClipMatrix, clipTriBuffer, triMask, clipPlaneMask );
-
+            GatherTransformClip<true>(
+                clipHead, clipTail, lanes, nTris, triIndex,
+                vtxX, vtxY, vtxW,
+                inVtx, inTris, vtxLayout,
+                modelToClipMatrix, clipTriBuffer, triMask, clipPlaneMask);
 
             if (triMask == 0x0)
                 continue;
@@ -1634,7 +1659,6 @@ public:
             ProjectVertices(pVtxX, pVtxY, pVtxZ, vtxX, vtxY, vtxW);
 #endif
 
-            // Backface culling, same as the repo
             __mw triArea1 = _mmw_mul_ps(_mmw_sub_ps(pVtxX[1], pVtxX[0]), _mmw_sub_ps(pVtxY[2], pVtxY[0]));
             __mw triArea2 = _mmw_mul_ps(_mmw_sub_ps(pVtxX[0], pVtxX[2]), _mmw_sub_ps(pVtxY[0], pVtxY[1]));
             __mw triArea = _mmw_sub_ps(triArea1, triArea2);
@@ -1654,7 +1678,7 @@ public:
 
             while (triMask)
             {
-                const unsigned int triIdx = find_clear_lsb(&triMask);
+                unsigned int triIdx = find_clear_lsb(&triMask);
 
                 int minTileX = max(0, min(mTilesWidth - 1, simd_i32(bbMinX)[triIdx] >> TILE_WIDTH_SHIFT));
                 int maxTileX = max(0, min(mTilesWidth - 1, simd_i32(bbMaxX)[triIdx] >> TILE_WIDTH_SHIFT));
@@ -1665,66 +1689,58 @@ public:
                 {
                     for (int tx = minTileX; tx <= maxTileX; ++tx)
                     {
-                        const int tileIdx = ty * mTilesWidth + tx;
+                        int tileIdx = ty * mTilesWidth + tx;
 
-                        // SAME PIPELINE AS REPO, but no HiZ update
-                        // only compute subtile coverage for this tile
                         __mwi coverage = _mmw_setzero_epi32();
 
-                        const int baseX = tx * TILE_WIDTH;
-                        const int baseY = ty * TILE_HEIGHT;
+                        // compute per-subtile coverage using same repo-like edge test
+                        int baseX = tx * TILE_WIDTH;
+                        int baseY = ty * TILE_HEIGHT;
 
                         for (int lane = 0; lane < 4; ++lane)
                         {
-                            const int sx = baseX + (lane % 4) * SUB_TILE_WIDTH;
-                            const int sy = baseY + (lane / 4) * SUB_TILE_HEIGHT;
+                            int sx = baseX + (lane % 4) * SUB_TILE_WIDTH;
+                            int sy = baseY + (lane / 4) * SUB_TILE_HEIGHT;
 
                             for (int py = 0; py < SUB_TILE_HEIGHT; ++py)
                             {
                                 for (int px = 0; px < SUB_TILE_WIDTH; ++px)
                                 {
-                                    const float x = (float)(sx + px) + 0.5f;
-                                    const float y = (float)(sy + py) + 0.5f;
+                                    float x = (float)(sx + px) + 0.5f;
+                                    float y = (float)(sy + py) + 0.5f;
 
-                                    const float v0x = simd_f32(pVtxX[0])[triIdx];
-                                    const float v0y = simd_f32(pVtxY[0])[triIdx];
-                                    const float v1x = simd_f32(pVtxX[1])[triIdx];
-                                    const float v1y = simd_f32(pVtxY[1])[triIdx];
-                                    const float v2x = simd_f32(pVtxX[2])[triIdx];
-                                    const float v2y = simd_f32(pVtxY[2])[triIdx];
+                                    float v0x = simd_f32(pVtxX[0])[triIdx];
+                                    float v0y = simd_f32(pVtxY[0])[triIdx];
+                                    float v1x = simd_f32(pVtxX[1])[triIdx];
+                                    float v1y = simd_f32(pVtxY[1])[triIdx];
+                                    float v2x = simd_f32(pVtxX[2])[triIdx];
+                                    float v2y = simd_f32(pVtxY[2])[triIdx];
 
-                                    const float e0 = (x - v0x) * (v1y - v0y) - (y - v0y) * (v1x - v0x);
-                                    const float e1 = (x - v1x) * (v2y - v1y) - (y - v1y) * (v2x - v1x);
-                                    const float e2 = (x - v2x) * (v0y - v2y) - (y - v2y) * (v0x - v2x);
+                                    float e0 = (x - v0x) * (v1y - v0y) - (y - v0y) * (v1x - v0x);
+                                    float e1 = (x - v1x) * (v2y - v1y) - (y - v1y) * (v2x - v1x);
+                                    float e2 = (x - v2x) * (v0y - v2y) - (y - v2y) * (v0x - v2x);
 
-                                    const bool inside =
+                                    bool inside =
                                         (e0 >= 0.0f && e1 >= 0.0f && e2 >= 0.0f) ||
                                         (e0 <= 0.0f && e1 <= 0.0f && e2 <= 0.0f);
 
                                     if (!inside)
                                         continue;
 
-                                    const int bit = py * 8 + px;
+                                    int bit = py * 8 + px;
                                     simd_i32(coverage)[lane] |= (1u << bit);
                                 }
                             }
                         }
 
-                        // same mask-before-write rule as the repo
-                        // __mwi alreadyWritten = GetMaskedSubtileMask(tileIdx);
-                        __mwi visibleMask =coverage;// _mmw_andnot_epi32(alreadyWritten, coverage);
-
-                        if (_mmw_testz_epi32(visibleMask, visibleMask))
-                            continue;
-
-                        // <-- no HiZ zMin / update here
-                        // simply write the visible subtiles into the 1-bit mask buffer
-                        WriteVisibleSubtilesTo1BitMask(visibleMask, tileIdx);
+                        // Coverage-only hierarchy: OR the result into the portal tile mask.
+                        mPortalMaskBuffer[tileIdx].mMask = _mmw_or_epi32(mPortalMaskBuffer[tileIdx].mMask, coverage);
                     }
                 }
             }
         }
     }
+
 	template<int TEST_Z, int FAST_GATHER>
 	FORCE_INLINE CullingResult RenderTriangles(const float *inVtx, const unsigned int *inTris, int nTris, const float *modelToClipMatrix, BackfaceWinding bfWinding, ClipPlanes clipPlaneMask, const VertexLayout &vtxLayout)
 	{
@@ -2232,6 +2248,37 @@ public:
 	{
 		return gInstructionSet;
 	}
+
+    void ComputePixelPortalBuffer(unsigned char *portalData, bool flipY) override
+    {
+        assert(mPortalMaskBuffer != nullptr);
+
+        for (int y = 0; y < mHeight; ++y)
+        {
+            for (int x = 0; x < mWidth; ++x)
+            {
+                const int tx = x / TILE_WIDTH;
+                const int ty = y / TILE_HEIGHT;
+                const int tileIdx = ty * mTilesWidth + tx;
+
+                const int stx = (x % TILE_WIDTH) / SUB_TILE_WIDTH;
+                const int sty = (y % TILE_HEIGHT) / SUB_TILE_HEIGHT;
+                const int lane = sty * 4 + stx;
+
+                const int px = x % SUB_TILE_WIDTH;
+                const int py = y % SUB_TILE_HEIGHT;
+                const int bitIdx = py * 8 + px;
+
+                const unsigned int bit = (simd_i32(mPortalMaskBuffer[tileIdx].mMask)[lane] >> bitIdx) & 1u;
+                const unsigned char value = bit ? 255u : 0u;
+
+                const int outY = flipY ? (mHeight - 1 - y) : y;
+                const int outIndex = outY * mWidth + x;
+
+                portalData[outIndex] = value;
+            }
+        }
+    }
 
 	void ComputePixelDepthBuffer(float *depthData, bool flipY) override
 	{
