@@ -1,6 +1,8 @@
 #
 # CMake file for the masked occlusion culling library
 #
+cmake_minimum_required(VERSION 3.5)
+
 set(CMAKE_SUPPRESS_REGENERATION true)
 option(USE_AVX512 "Enable experimental AVX-512 support" OFF)
 set(CMAKE_CONFIGURATION_TYPES Debug Release)
