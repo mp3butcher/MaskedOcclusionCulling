@@ -141,10 +141,10 @@ public:
 
 	ZTile           *mMaskedHiZBuffer;
 	ScissorRect     mFullscreenScissor;
-        // Packed 1-bit mask buffer
-        static_assert(sizeof(unsigned int)==4,"unsigned int shoudl be 32 bits ");
-        unsigned int *m1BitMaskBuffer;
-        unsigned int m1BitMaskWords;
+    // Packed 1-bit mask buffer
+    static_assert(sizeof(unsigned int)==4,"unsigned int shoudl be 32 bits ");
+    unsigned int *m1BitMaskBuffer;
+    unsigned int m1BitMaskWords;
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 	// Constructors and state handling
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -273,8 +273,7 @@ public:
                 mAlignedFreeCallback(m1BitMaskBuffer);
             // one bit mask
             m1BitMaskBuffer = (unsigned int*)mAlignedAllocCallback(64, maskWords * sizeof(unsigned int));
-            m1BitMaskWidth = width;
-            m1BitMaskHeight = height;
+
             m1BitMaskWords = (unsigned int)maskWords;
             Clear1BitMaskBuffer();
         }
@@ -830,47 +829,7 @@ public:
 		return ((bfWinding & BACKFACE_CCW) ? 0 : _mmw_movemask_ps(ccwMask)) | ((bfWinding & BACKFACE_CW) ? 0 : ~_mmw_movemask_ps(ccwMask));
 	}
 #endif
-        FORCE_INLINE bool IsSubtileMasked(int tileIdx, int lane) const
-        {
-            if (m1BitMaskBuffer == nullptr)
-                return false;
 
-            const int tileX = tileIdx % mTilesWidth;
-            const int tileY = tileIdx / mTilesWidth;
-            const int px = tileX * TILE_WIDTH + lane * SUB_TILE_WIDTH;
-            const int py = tileY * TILE_HEIGHT;
-
-            for (int y = 0; y < SUB_TILE_HEIGHT; ++y)
-            {
-                for (int x = 0; x < SUB_TILE_WIDTH; ++x)
-                {
-                    const int sx = px + x;
-                    const int sy = py + y;
-                    if (sx < 0 || sy < 0 || sx >= mWidth || sy >= mHeight)
-                        continue;
-
-                    const unsigned int idx = (unsigned int)sy * (unsigned int)mWidth + (unsigned int)sx;
-                    if ((m1BitMaskBuffer[idx >> 5] & (1u << (idx & 31u))) != 0u)
-                        return true;
-                }
-            }
-            return false;
-        }
-
-        FORCE_INLINE __mwi GetMaskedSubtileMask(int tileIdx) const
-        {
-            __mwi masked = _mmw_setzero_epi32();
-            if (m1BitMaskBuffer == nullptr)
-                return masked;
-
-            // Each SIMD lane corresponds to one 8x4 subtile in the current tile.
-            for (int lane = 0; lane < 4; ++lane)
-            {
-                if (IsSubtileMasked(tileIdx, lane))
-                    simd_i32(masked)[lane] = ~0U;
-            }
-            return masked;
-        }
 	FORCE_INLINE void ComputeDepthPlane(const __mw *pVtxX, const __mw *pVtxY, const __mw *pVtxZ, __mw &zPixelDx, __mw &zPixelDy) const
 	{
 		// Setup z(x,y) = z0 + dx*x + dy*y screen space depth plane equation
@@ -898,12 +857,6 @@ public:
 		// Swizzle coverage mask to 8x4 subtiles and test if any subtiles are not covered at all
 		__mwi rastMask = coverage;
 		__mwi deadLane = _mmw_cmpeq_epi32(rastMask, SIMD_BITS_ZERO);
-
-		// Reject any 8x4 subtile already marked in the 1-bit mask buffer.
-		// This is the critical "mask-before-depth-write" gate: if a subtile is already set,
-		// don't update that subtile's zMin / coverage.
-		__mwi maskedSubtileMask = GetMaskedSubtileMask(tileIdx);
-		deadLane = _mmw_or_epi32(deadLane, maskedSubtileMask);
 
 		// Mask out all subtiles failing the depth test (don't update these subtiles)
 		deadLane = _mmw_or_epi32(deadLane, _mmw_srai_epi32(simd_cast<__mwi>(_mmw_sub_ps(zTriv, zMin[0])), 31));
@@ -941,10 +894,6 @@ public:
 
 		// Swizzle coverage mask to 8x4 subtiles
 		__mwi rastMask = coverage;
-
-		// Reject subtiles already set in the 1-bit mask buffer before any depth write.
-		__mwi maskedSubtileMask = GetMaskedSubtileMask(tileIdx);
-		rastMask = _mmw_andnot_epi32(maskedSubtileMask, rastMask);
 
 		// Perform individual depth tests with layer 0 & 1 and mask out all failing pixels 
 		__mw sdist0 = _mmw_sub_ps(zMin[0], zTriv);
@@ -1060,13 +1009,6 @@ public:
 
 					__mwi rastMask = _mmw_transpose_epi8(accumulatedMask);
 					__mwi deadLane = _mmw_cmpeq_epi32(rastMask, SIMD_BITS_ZERO);
-					// Remove already-masked subtiles before running the visibility test.
-					if (m1BitMaskBuffer)
-					{
-						__mwi maskedSubtileMask = GetMaskedSubtileMask(tileIdx);
-						rastMask = _mmw_andnot_epi32(maskedSubtileMask, rastMask);
-						deadLane = _mmw_or_epi32(deadLane, maskedSubtileMask);
-					}
 					zPass = _mmw_andnot_epi32(deadLane, zPass);
 
 					if (!_mmw_testz_epi32(zPass, zPass))
@@ -1076,18 +1018,10 @@ public:
 				{
 					// Compute interpolated min for each 8x4 subtile and update the masked hierarchical z buffer entry
 					__mw zSubTileMin = _mmw_max_ps(z0, zTriMin);
-
-					// Remove already-masked subtiles before the depth write.
-					__mwi rastMask = _mmw_transpose_epi8(accumulatedMask);
-					if (m1BitMaskBuffer)
-					{
-						__mwi maskedSubtileMask = GetMaskedSubtileMask(tileIdx);
-						rastMask = _mmw_andnot_epi32(maskedSubtileMask, rastMask);
-					}
 #if QUICK_MASK != 0
-					UpdateTileQuick(tileIdx, rastMask, zSubTileMin);
+                    UpdateTileQuick(tileIdx, _mmw_transpose_epi8(accumulatedMask), zSubTileMin);
 #else 
-					UpdateTileAccurate(tileIdx, rastMask, zSubTileMin);
+                    UpdateTileAccurate(tileIdx, _mmw_transpose_epi8(accumulatedMask), zSubTileMin);
 #endif
 				}
 			}
@@ -1616,10 +1550,8 @@ public:
 
 		return cullResult;
 	}
-    FORCE_INLINE void WriteVisibleSubtilesTo1BitMask(int tileIdx, const __mwi &visibleMask)
+    FORCE_INLINE void WriteVisibleSubtilesTo1BitMask(const __mwi &visibleMask, int tileIdx)
     {
-        // Each lane corresponds to one 8x4 subtile inside the current tile.
-        // A lane mask is a 32-bit bitfield: bits [0..31] = 8x4 pixels in that subtile.
         const int tileX = tileIdx % mTilesWidth;
         const int tileY = tileIdx / mTilesWidth;
 
@@ -1628,42 +1560,41 @@ public:
 
         for (int lane = 0; lane < 4; ++lane)
         {
-            const uint32_t laneMask = simd_i32(visibleMask)[lane];
+            const unsigned int laneMask = simd_i32(visibleMask)[lane];
             if (laneMask == 0)
                 continue;
 
             const int sx = baseX + (lane % 4) * SUB_TILE_WIDTH;
             const int sy = baseY + (lane / 4) * SUB_TILE_HEIGHT;
 
-            // Each 8x4 subtile has 4 rows of 8 pixels.
-            // Pack each row into the 1-bit mask buffer as 32-bit words.
             for (int row = 0; row < SUB_TILE_HEIGHT; ++row)
             {
-                const uint32_t rowBits = (laneMask >> (row * 8)) & 0xFFu;
-                if (rowBits == 0)
+                const unsigned int rowMask = (laneMask >> (row * 8)) & 0xFFu;
+                if (rowMask == 0)
                     continue;
 
                 const int y = sy + row;
-                const int x = sx;
+                const int x0 = sx;
 
-                // Since rowBits is 8 pixels wide, this maps directly to 32-bit storage words.
-                const unsigned int wordIndex = (unsigned int)(y * mWidth + x) >> 5;
-                const unsigned int bitOffset = (unsigned int)(y * mWidth + x) & 31u;
+                const unsigned int wordIndex = (unsigned int)(y * mWidth + x0) >> 5;
+                const unsigned int bitOffset = (unsigned int)(y * mWidth + x0) & 31u;
 
                 if (bitOffset <= 24u)
                 {
-                    // Entire 8-bit row fits in one 32-bit word.
-                    m1BitMaskBuffer[wordIndex] |= (rowBits << bitOffset);
+                    // IMPORTANT: preserve previous mask bits
+                    m1BitMaskBuffer[wordIndex] |= (rowMask << bitOffset);
                 }
                 else
                 {
-                    // Split across a 32-bit word boundary.
-                    m1BitMaskBuffer[wordIndex] |= (rowBits << bitOffset);
-                    m1BitMaskBuffer[wordIndex + 1] |= (rowBits >> (32u - bitOffset));
+                    // split across 32-bit boundary, still preserve previous bits
+                    m1BitMaskBuffer[wordIndex] |= (rowMask << bitOffset);
+                    m1BitMaskBuffer[wordIndex + 1] |= (rowMask >> (32u - bitOffset));
                 }
             }
         }
     }
+
+    FORCE_INLINE unsigned int * get1BitMask() override { return m1BitMaskBuffer; }
     FORCE_INLINE void RenderTrianglesTo1BitMask(
         const float *inVtx,
         const unsigned int *inTris,
@@ -1671,41 +1602,25 @@ public:
         const float *modelToClipMatrix,
         BackfaceWinding bfWinding,
         ClipPlanes clipPlaneMask,
-        const VertexLayout &vtxLayout) override
+        const VertexLayout &vtxLayout)
     {
         if (!inVtx || !inTris || nTris <= 0)
             return;
 
-        // This function follows the repo’s model:
-        //   1) transform/clip/project triangle
-        //   2) find covered tiles
-        //   3) compute subtile coverage
-        //   4) reject already masked subtiles
-        //   5) depth-test against HiZ tile data
-        //   6) pack visible pixels into m1BitMaskBuffer
-
-        // We use the same triangle data representation as the rest of this class:
-        // pVtxX, pVtxY, pVtxZ are screen-space triangle vertices.
-        // The rasterizer already knows how to do this for occluder rendering.
-
-        const unsigned int *inTrisPtr = inTris;
-        int triIndex = 0;
         int clipHead = 0;
         int clipTail = 0;
         __m128 clipTriBuffer[MAX_CLIPPED * 3];
 
+        const unsigned int *inTrisPtr = inTris;
         int numLanes = SIMD_LANES;
+        int triIndex = 0;
         while (triIndex < nTris || clipHead != clipTail)
         {
             __mw vtxX[3], vtxY[3], vtxW[3];
             unsigned int triMask = SIMD_ALL_LANES_MASK;
 
-            // Reuse existing gather/clip path from the class.
-            // This matches the rest of the MOC implementation.
-            GatherTransformClip<true>(
-                clipHead, clipTail, /*numLanes*/ numLanes, nTris, triIndex,
-                vtxX, vtxY, vtxW, inVtx, inTrisPtr, vtxLayout,
-                modelToClipMatrix, clipTriBuffer, triMask, clipPlaneMask);
+            GatherTransformClip<1>( clipHead, clipTail, numLanes, nTris, triIndex, vtxX, vtxY, vtxW, inVtx, inTrisPtr, vtxLayout, modelToClipMatrix, clipTriBuffer, triMask, clipPlaneMask );
+
 
             if (triMask == 0x0)
                 continue;
@@ -1719,7 +1634,7 @@ public:
             ProjectVertices(pVtxX, pVtxY, pVtxZ, vtxX, vtxY, vtxW);
 #endif
 
-            // Backface culling.
+            // Backface culling, same as the repo
             __mw triArea1 = _mmw_mul_ps(_mmw_sub_ps(pVtxX[1], pVtxX[0]), _mmw_sub_ps(pVtxY[2], pVtxY[0]));
             __mw triArea2 = _mmw_mul_ps(_mmw_sub_ps(pVtxX[0], pVtxX[2]), _mmw_sub_ps(pVtxY[0], pVtxY[1]));
             __mw triArea = _mmw_sub_ps(triArea1, triArea2);
@@ -1734,32 +1649,17 @@ public:
             if (triMask == 0x0)
                 continue;
 
-            // Compute a conservative pixel bbox in screen space.
             __mwi bbMinX, bbMinY, bbMaxX, bbMaxY;
             ComputeBoundingBox(bbMinX, bbMinY, bbMaxX, bbMaxY, pVtxX, pVtxY, &mFullscreenScissor);
 
             while (triMask)
             {
-                unsigned int triIdx = find_clear_lsb(&triMask);
+                const unsigned int triIdx = find_clear_lsb(&triMask);
 
-                // Extract the current triangle from SIMD lane triIdx.
-                __mw triX[3], triY[3], triZ[3];
-                triX[0] = _mmw_set1_ps(simd_f32(pVtxX[0])[triIdx]);
-                triX[1] = _mmw_set1_ps(simd_f32(pVtxX[1])[triIdx]);
-                triX[2] = _mmw_set1_ps(simd_f32(pVtxX[2])[triIdx]);
-
-                triY[0] = _mmw_set1_ps(simd_f32(pVtxY[0])[triIdx]);
-                triY[1] = _mmw_set1_ps(simd_f32(pVtxY[1])[triIdx]);
-                triY[2] = _mmw_set1_ps(simd_f32(pVtxY[2])[triIdx]);
-
-                triZ[0] = _mmw_set1_ps(simd_f32(pVtxZ[0])[triIdx]);
-                triZ[1] = _mmw_set1_ps(simd_f32(pVtxZ[1])[triIdx]);
-                triZ[2] = _mmw_set1_ps(simd_f32(pVtxZ[2])[triIdx]);
-
-                const int minTileX = max(0, min(mTilesWidth - 1, simd_i32(bbMinX)[triIdx] >> TILE_WIDTH_SHIFT));
-                const int minTileY = max(0, min(mTilesHeight - 1, simd_i32(bbMinY)[triIdx] >> TILE_HEIGHT_SHIFT));
-                const int maxTileX = max(0, min(mTilesWidth - 1, simd_i32(bbMaxX)[triIdx] >> TILE_WIDTH_SHIFT));
-                const int maxTileY = max(0, min(mTilesHeight - 1, simd_i32(bbMaxY)[triIdx] >> TILE_HEIGHT_SHIFT));
+                int minTileX = max(0, min(mTilesWidth - 1, simd_i32(bbMinX)[triIdx] >> TILE_WIDTH_SHIFT));
+                int maxTileX = max(0, min(mTilesWidth - 1, simd_i32(bbMaxX)[triIdx] >> TILE_WIDTH_SHIFT));
+                int minTileY = max(0, min(mTilesHeight - 1, simd_i32(bbMinY)[triIdx] >> TILE_HEIGHT_SHIFT));
+                int maxTileY = max(0, min(mTilesHeight - 1, simd_i32(bbMaxY)[triIdx] >> TILE_HEIGHT_SHIFT));
 
                 for (int ty = minTileY; ty <= maxTileY; ++ty)
                 {
@@ -1767,16 +1667,13 @@ public:
                     {
                         const int tileIdx = ty * mTilesWidth + tx;
 
-                        // Compute 8x4 subtile coverage for this tile.
-                        // This is the important part: it is still tile/subtile-based.
+                        // SAME PIPELINE AS REPO, but no HiZ update
+                        // only compute subtile coverage for this tile
                         __mwi coverage = _mmw_setzero_epi32();
 
                         const int baseX = tx * TILE_WIDTH;
                         const int baseY = ty * TILE_HEIGHT;
 
-                        // The repo's real implementation uses a higher-performance cover-mask
-                        // construction. This simpler version is correct and easy to reason about.
-                        // It only marks the subtiles that are actually covered by the triangle.
                         for (int lane = 0; lane < 4; ++lane)
                         {
                             const int sx = baseX + (lane % 4) * SUB_TILE_WIDTH;
@@ -1789,23 +1686,20 @@ public:
                                     const float x = (float)(sx + px) + 0.5f;
                                     const float y = (float)(sy + py) + 0.5f;
 
-                                    // Barycentric test in screen space; this is conservative enough for the mask.
-                                    // Use the usual triangle edge tests.
-                                    const float v0x = simd_f32(triX[0])[0];
-                                    const float v0y = simd_f32(triY[0])[0];
-                                    const float v1x = simd_f32(triX[1])[0];
-                                    const float v1y = simd_f32(triY[1])[0];
-                                    const float v2x = simd_f32(triX[2])[0];
-                                    const float v2y = simd_f32(triY[2])[0];
+                                    const float v0x = simd_f32(pVtxX[0])[triIdx];
+                                    const float v0y = simd_f32(pVtxY[0])[triIdx];
+                                    const float v1x = simd_f32(pVtxX[1])[triIdx];
+                                    const float v1y = simd_f32(pVtxY[1])[triIdx];
+                                    const float v2x = simd_f32(pVtxX[2])[triIdx];
+                                    const float v2y = simd_f32(pVtxY[2])[triIdx];
 
-                                    const float edge0 = (x - v0x) * (v1y - v0y) - (y - v0y) * (v1x - v0x);
-                                    const float edge1 = (x - v1x) * (v2y - v1y) - (y - v1y) * (v2x - v1x);
-                                    const float edge2 = (x - v2x) * (v0y - v2y) - (y - v2y) * (v0x - v2x);
+                                    const float e0 = (x - v0x) * (v1y - v0y) - (y - v0y) * (v1x - v0x);
+                                    const float e1 = (x - v1x) * (v2y - v1y) - (y - v1y) * (v2x - v1x);
+                                    const float e2 = (x - v2x) * (v0y - v2y) - (y - v2y) * (v0x - v2x);
 
-                                    // This is a simple "inside triangle" test.
-                                    // For a front-facing triangle the winding is already handled earlier.
-                                    const bool inside = (edge0 >= 0.0f && edge1 >= 0.0f && edge2 >= 0.0f) ||
-                                                        (edge0 <= 0.0f && edge1 <= 0.0f && edge2 <= 0.0f);
+                                    const bool inside =
+                                        (e0 >= 0.0f && e1 >= 0.0f && e2 >= 0.0f) ||
+                                        (e0 <= 0.0f && e1 <= 0.0f && e2 <= 0.0f);
 
                                     if (!inside)
                                         continue;
@@ -1816,58 +1710,16 @@ public:
                             }
                         }
 
-                        // Reject already masked subtiles.
-                        __mwi masked = GetMaskedSubtileMask(tileIdx);
-                        __mwi visibleCoverage = _mmw_andnot_epi32(masked, coverage);
-                        if (_mmw_testz_epi32(visibleCoverage, visibleCoverage))
+                        // same mask-before-write rule as the repo
+                        // __mwi alreadyWritten = GetMaskedSubtileMask(tileIdx);
+                        __mwi visibleMask =coverage;// _mmw_andnot_epi32(alreadyWritten, coverage);
+
+                        if (_mmw_testz_epi32(visibleMask, visibleMask))
                             continue;
 
-                        // Depth-test visible coverage against the hierarchical z buffer.
-                        // Reversed-Z semantics: fragment passes if zFrag >= zBuffer.
-                        __mw zMinBuf = mMaskedHiZBuffer[tileIdx].mZMin[0];
-
-                        // To remain honest with the repo’s model, we do the z test per subtile.
-                        // This is still tile-aware and does not read a flat pixel depth buffer.
-                        __mwi zPass = _mmw_setzero_epi32();
-
-                        for (int lane = 0; lane < 4; ++lane)
-                        {
-                            if ((simd_i32(visibleCoverage)[lane] == 0))
-                                continue;
-
-                            // Evaluate a conservative z value at the subtile.
-                            // The actual integer MOC code computes this via the triangle plane equation, but
-                            // for a correct implementation pattern, evaluating the triangle's plane at the
-                            // subtile center is enough to determine whether the subtile survives the HiZ test.
-                            const int sx = baseX + (lane % 4) * SUB_TILE_WIDTH;
-                            const int sy = baseY + (lane / 4) * SUB_TILE_HEIGHT;
-
-                            const float cx = (float)(sx + SUB_TILE_WIDTH / 2) + 0.5f;
-                            const float cy = (float)(sy + SUB_TILE_HEIGHT / 2) + 0.5f;
-
-                            // Compute plane depth at the center of the subtile.
-                            // This is z = 1/w in the MOC convention.
-                            const float zFrag = (
-                                (simd_f32(triZ[0])[0] * (cx - simd_f32(triX[0])[0]) +
-                                 simd_f32(triZ[1])[0] * (cx - simd_f32(triX[1])[0]) +
-                                 simd_f32(triZ[2])[0] * (cx - simd_f32(triX[2])[0])) /
-                                (simd_f32(triX[0])[0] + simd_f32(triX[1])[0] + simd_f32(triX[2])[0])
-                                );
-
-                            // For the actual repo, this test is performed against the tile's zMin[]
-                            // using the conservative MOC z-plane logic.
-                            // Here we keep the logic simple and correct in principle.
-                            if (zFrag >= simd_f32(zMinBuf)[lane])
-                                simd_i32(zPass)[lane] = simd_i32(visibleCoverage)[lane];
-                        }
-
-                        // Nothing survives the depth test => skip writing.
-                        if (_mmw_testz_epi32(zPass, zPass))
-                            continue;
-
-                        // Final write: visible pixels into the flat 1-bit mask buffer,
-                        // packed in the repo's 32-bit word layout.
-                        WriteVisibleSubtilesTo1BitMask(tileIdx, zPass);
+                        // <-- no HiZ zMin / update here
+                        // simply write the visible subtiles into the 1-bit mask buffer
+                        WriteVisibleSubtilesTo1BitMask(visibleMask, tileIdx);
                     }
                 }
             }

@@ -349,6 +349,10 @@ public:
         ClipPlanes clipPlaneMask = CLIP_PLANE_ALL,
         const VertexLayout &vtxLayout = VertexLayout(16, 4, 12)) = 0;
 
+    /*!
+    * \brief return the 1 bit buffer mask
+    */
+    virtual unsigned int * get1BitMask();
 	/*! 
 	 * \brief Renders a mesh of occluder triangles and updates the hierarchical z buffer
 	 *        with conservative depth values.
