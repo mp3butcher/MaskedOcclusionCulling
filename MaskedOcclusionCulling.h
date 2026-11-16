@@ -347,11 +347,28 @@ public:
         const float *modelToClipMatrix = nullptr,
         BackfaceWinding bfWinding = BACKFACE_CW,
         ClipPlanes clipPlaneMask = CLIP_PLANE_ALL,
+        const unsigned int *stencilPortalMask = nullptr,
         const VertexLayout &vtxLayout = VertexLayout(16, 4, 12)) = 0;
+
+    /*!
+     * \brief test rectangle in NDC coordinate for collision with portal buffer.
+     */
     virtual bool TestRectAgainstPortalBuffer(float xmin, float ymin, float xmax, float ymax) const = 0;
 
     /*!
-    * \brief return the 1 bit buffer mask
+     * \brief Returns the packed portal mask buffer.
+     * The returned pointer is laid out as 4 uint32 words per tile.
+     */
+    virtual const unsigned int *GetPortalMaskBuffer() const = 0;
+
+    /*!
+     * \brief Returns the number of uint32 words in the packed portal mask buffer.
+     * This is always 4 * mTilesWidth * mTilesHeight.
+     */
+    virtual unsigned int GetPortalMaskBufferWordCount() const = 0;
+
+    /*!
+    * \brief return the 1 bit buffer mask as an image
     */
     virtual void ComputePixelPortalBuffer(unsigned char *portalData, bool flipY) = 0;
 

@@ -20,6 +20,11 @@
 #include "MaskedOcclusionCulling.h"
 #include "CompilerSpecific.inl"
 
+#define _mmw_set1_epi32             _mm_set1_epi32
+#define _mmw_loadu_epi32(a)         _mm_loadu_si128((const __m128i *)(a))
+#define _mmw_setzero_epi32          _mm_setzero_si128
+#define _mmw_and_epi32              _mm_and_si128
+
 #if MOC_RECORDER_ENABLE
 #include "FrameRecorder.h"
 #endif

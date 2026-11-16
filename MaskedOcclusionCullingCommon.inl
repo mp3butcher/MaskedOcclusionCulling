@@ -195,65 +195,67 @@ public:
             mPortalMaskBuffer[i].mMask = _mmw_setzero_epi32();
     }
 
-        void SetResolution(unsigned int width, unsigned int height) override
-        {
-            // Resolution must be a multiple of the subtile size
-            assert(width % SUB_TILE_WIDTH == 0 && height % SUB_TILE_HEIGHT == 0);
-    #if PRECISE_COVERAGE == 0
-            // Test if combination of resolution & SLOPE_FP_BITS bits may cause 32-bit overflow. Note that the maximum resolution estimate
-            // is only an estimate (not conservative). It's advicable to stay well below the limit.
-            assert(width < ((1U << 31) - 1U) / ((1U << FP_BITS) * (TILE_HEIGHT + (unsigned int)(GUARD_BAND_PIXEL_SIZE + 1.0f))) - (2U * (unsigned int)(GUARD_BAND_PIXEL_SIZE + 1.0f)));
-    #endif
+    void SetResolution(unsigned int width, unsigned int height) override
+    {
+        // Resolution must be a multiple of the subtile size
+        assert(width % SUB_TILE_WIDTH == 0 && height % SUB_TILE_HEIGHT == 0);
+#if PRECISE_COVERAGE == 0
+        // Test if combination of resolution & SLOPE_FP_BITS bits may cause 32-bit overflow. Note that the maximum resolution estimate
+        // is only an estimate (not conservative). It's advicable to stay well below the limit.
+        assert(width < ((1U << 31) - 1U) / ((1U << FP_BITS) * (TILE_HEIGHT + (unsigned int)(GUARD_BAND_PIXEL_SIZE + 1.0f))) - (2U * (unsigned int)(GUARD_BAND_PIXEL_SIZE + 1.0f)));
+#endif
 
-            // Delete current masked hierarchical Z buffer
-            if (mMaskedHiZBuffer != nullptr)
-                mAlignedFreeCallback(mMaskedHiZBuffer);
-            mMaskedHiZBuffer = nullptr;
+        // Delete current masked hierarchical Z buffer
+        if (mMaskedHiZBuffer != nullptr)
+            mAlignedFreeCallback(mMaskedHiZBuffer);
+        mMaskedHiZBuffer = nullptr;
 
-            // Setup various resolution dependent constant values
-            mWidth = (int)width;
-            mHeight = (int)height;
-            mTilesWidth = (int)(width + TILE_WIDTH - 1) >> TILE_WIDTH_SHIFT;
-            mTilesHeight = (int)(height + TILE_HEIGHT - 1) >> TILE_HEIGHT_SHIFT;
-            mCenterX = _mmw_set1_ps((float)mWidth  * 0.5f);
-            mCenterY = _mmw_set1_ps((float)mHeight * 0.5f);
-            mICenter = _mm_setr_ps((float)mWidth * 0.5f, (float)mWidth * 0.5f, (float)mHeight * 0.5f, (float)mHeight * 0.5f);
-            mHalfWidth = _mmw_set1_ps((float)mWidth  * 0.5f);
-    #if USE_D3D != 0
-            mHalfHeight = _mmw_set1_ps((float)-mHeight * 0.5f);
-            mIHalfSize = _mm_setr_ps((float)mWidth * 0.5f, (float)mWidth * 0.5f, (float)-mHeight * 0.5f, (float)-mHeight * 0.5f);
-    #else
-            mHalfHeight = _mmw_set1_ps((float)mHeight * 0.5f);
-            mIHalfSize = _mm_setr_ps((float)mWidth * 0.5f, (float)mWidth * 0.5f, (float)mHeight * 0.5f, (float)mHeight * 0.5f);
-    #endif
-            mIScreenSize = _mm_setr_epi32(mWidth - 1, mWidth - 1, mHeight - 1, mHeight - 1);
+        // Setup various resolution dependent constant values
+        mWidth = (int)width;
+        mHeight = (int)height;
+        mTilesWidth = (int)(width + TILE_WIDTH - 1) >> TILE_WIDTH_SHIFT;
+        mTilesHeight = (int)(height + TILE_HEIGHT - 1) >> TILE_HEIGHT_SHIFT;
+        mCenterX = _mmw_set1_ps((float)mWidth  * 0.5f);
+        mCenterY = _mmw_set1_ps((float)mHeight * 0.5f);
+        mICenter = _mm_setr_ps((float)mWidth * 0.5f, (float)mWidth * 0.5f, (float)mHeight * 0.5f, (float)mHeight * 0.5f);
+        mHalfWidth = _mmw_set1_ps((float)mWidth  * 0.5f);
+#if USE_D3D != 0
+        mHalfHeight = _mmw_set1_ps((float)-mHeight * 0.5f);
+        mIHalfSize = _mm_setr_ps((float)mWidth * 0.5f, (float)mWidth * 0.5f, (float)-mHeight * 0.5f, (float)-mHeight * 0.5f);
+#else
+        mHalfHeight = _mmw_set1_ps((float)mHeight * 0.5f);
+        mIHalfSize = _mm_setr_ps((float)mWidth * 0.5f, (float)mWidth * 0.5f, (float)mHeight * 0.5f, (float)mHeight * 0.5f);
+#endif
+        mIScreenSize = _mm_setr_epi32(mWidth - 1, mWidth - 1, mHeight - 1, mHeight - 1);
 
-            // Setup a full screen scissor rectangle
-            mFullscreenScissor.mMinX = 0;
-            mFullscreenScissor.mMinY = 0;
-            mFullscreenScissor.mMaxX = mTilesWidth << TILE_WIDTH_SHIFT;
-            mFullscreenScissor.mMaxY = mTilesHeight << TILE_HEIGHT_SHIFT;
+        // Setup a full screen scissor rectangle
+        mFullscreenScissor.mMinX = 0;
+        mFullscreenScissor.mMinY = 0;
+        mFullscreenScissor.mMaxX = mTilesWidth << TILE_WIDTH_SHIFT;
+        mFullscreenScissor.mMaxY = mTilesHeight << TILE_HEIGHT_SHIFT;
 
-            // Adjust clip planes to include a small guard band to avoid clipping leaks
-            float guardBandWidth = (2.0f / (float)mWidth) * GUARD_BAND_PIXEL_SIZE;
-            float guardBandHeight = (2.0f / (float)mHeight) * GUARD_BAND_PIXEL_SIZE;
-            mCSFrustumPlanes[1] = _mm_setr_ps(1.0f - guardBandWidth, 0.0f, 1.0f, 0.0f);
-            mCSFrustumPlanes[2] = _mm_setr_ps(-1.0f + guardBandWidth, 0.0f, 1.0f, 0.0f);
-            mCSFrustumPlanes[3] = _mm_setr_ps(0.0f, 1.0f - guardBandHeight, 1.0f, 0.0f);
-            mCSFrustumPlanes[4] = _mm_setr_ps(0.0f, -1.0f + guardBandHeight, 1.0f, 0.0f);
+        // Adjust clip planes to include a small guard band to avoid clipping leaks
+        float guardBandWidth = (2.0f / (float)mWidth) * GUARD_BAND_PIXEL_SIZE;
+        float guardBandHeight = (2.0f / (float)mHeight) * GUARD_BAND_PIXEL_SIZE;
+        mCSFrustumPlanes[1] = _mm_setr_ps(1.0f - guardBandWidth, 0.0f, 1.0f, 0.0f);
+        mCSFrustumPlanes[2] = _mm_setr_ps(-1.0f + guardBandWidth, 0.0f, 1.0f, 0.0f);
+        mCSFrustumPlanes[3] = _mm_setr_ps(0.0f, 1.0f - guardBandHeight, 1.0f, 0.0f);
+        mCSFrustumPlanes[4] = _mm_setr_ps(0.0f, -1.0f + guardBandHeight, 1.0f, 0.0f);
 
-            // Allocate masked hierarchical Z buffer (if zero size leave at nullptr)
-            if(mTilesWidth * mTilesHeight > 0)
-                mMaskedHiZBuffer = (ZTile *)mAlignedAllocCallback(64, sizeof(ZTile) * mTilesWidth * mTilesHeight);
+        // Allocate masked hierarchical Z buffer (if zero size leave at nullptr)
+        if(mTilesWidth * mTilesHeight > 0)
+            mMaskedHiZBuffer = (ZTile *)mAlignedAllocCallback(64, sizeof(ZTile) * mTilesWidth * mTilesHeight);
+        const size_t maskWords = ((size_t)width * (size_t)height + 31u) >> 5;
 
-            if (mPortalMaskBuffer)
-                mAlignedFreeCallback(mPortalMaskBuffer);
-            mPortalMaskBuffer = (PortalTile *)mAlignedAllocCallback(64, sizeof(PortalTile) * mTilesWidth * mTilesHeight);
+        if (mPortalMaskBuffer)
+            mAlignedFreeCallback(mPortalMaskBuffer);
 
-            for (int i = 0; i < mTilesWidth * mTilesHeight; ++i)
-                mPortalMaskBuffer[i].mMask = _mmw_setzero_epi32();
-            ClearPortalBuffer();
-        }
+        mPortalMaskBuffer = (PortalTile *)mAlignedAllocCallback(64, sizeof(PortalTile) * mTilesWidth * mTilesHeight);
+
+        for (int i = 0; i < mTilesWidth * mTilesHeight; ++i)
+            mPortalMaskBuffer[i].mMask = _mmw_setzero_epi32();
+        ClearPortalBuffer();
+    }
 
 	void GetResolution(unsigned int &width, unsigned int &height) const override
 	{
@@ -1618,6 +1620,18 @@ public:
 
         return false;
     }
+
+    FORCE_INLINE const unsigned int *GetPortalMaskBuffer() const override
+    {
+        return mPortalMaskBuffer ? reinterpret_cast<const unsigned int *>(mPortalMaskBuffer) : nullptr;
+    }
+
+    FORCE_INLINE unsigned int GetPortalMaskBufferWordCount() const override
+    {
+        const unsigned int wordsPerTile = SIMD_LANES;
+        return static_cast<unsigned int>(mTilesWidth * mTilesHeight) * wordsPerTile;
+    }
+
     FORCE_INLINE void RenderTrianglesToPortalBuffer(
         const float *inVtx,
         const unsigned int *inTris,
@@ -1625,6 +1639,7 @@ public:
         const float *modelToClipMatrix,
         BackfaceWinding bfWinding,
         ClipPlanes clipPlaneMask,
+        const unsigned int *stencilPortalMask,
         const VertexLayout &vtxLayout) override
     {
         if (!inVtx || !inTris || nTris <= 0)
@@ -1635,16 +1650,17 @@ public:
         int lanes = SIMD_LANES;
         __m128 clipTriBuffer[MAX_CLIPPED * 3];
 
+        const unsigned int *inTrisPtr = inTris;
         int triIndex = 0;
         while (triIndex < nTris || clipHead != clipTail)
         {
             __mw vtxX[3], vtxY[3], vtxW[3];
             unsigned int triMask = SIMD_ALL_LANES_MASK;
 
-            GatherTransformClip<true>(
+            GatherTransformClip<false>(
                 clipHead, clipTail, lanes, nTris, triIndex,
                 vtxX, vtxY, vtxW,
-                inVtx, inTris, vtxLayout,
+                inVtx, inTrisPtr, vtxLayout,
                 modelToClipMatrix, clipTriBuffer, triMask, clipPlaneMask);
 
             if (triMask == 0x0)
@@ -1684,7 +1700,23 @@ public:
                 int maxTileX = max(0, min(mTilesWidth - 1, simd_i32(bbMaxX)[triIdx] >> TILE_WIDTH_SHIFT));
                 int minTileY = max(0, min(mTilesHeight - 1, simd_i32(bbMinY)[triIdx] >> TILE_HEIGHT_SHIFT));
                 int maxTileY = max(0, min(mTilesHeight - 1, simd_i32(bbMaxY)[triIdx] >> TILE_HEIGHT_SHIFT));
+                const float v0x = simd_f32(pVtxX[0])[triIdx];
+                const float v0y = simd_f32(pVtxY[0])[triIdx];
+                const float v1x = simd_f32(pVtxX[1])[triIdx];
+                const float v1y = simd_f32(pVtxY[1])[triIdx];
+                const float v2x = simd_f32(pVtxX[2])[triIdx];
+                const float v2y = simd_f32(pVtxY[2])[triIdx];
+                const float z0 = simd_f32(pVtxZ[0])[triIdx];
+                const float z1 = simd_f32(pVtxZ[1])[triIdx];
+                const float z2 = simd_f32(pVtxZ[2])[triIdx];
+                const float x1 = v1x - v0x, y1 = v1y - v0y;
+                const float x2 = v2x - v0x, y2 = v2y - v0y;
+                const float det = x1 * y2 - y1 * x2;
 
+                if (det == 0.0f)
+                    continue;
+                const float zDx = ((z1 - z0) * y2 - y1 * (z2 - z0)) / det;
+                const float zDy = (x1 * (z2 - z0) - (z1 - z0) * x2) / det;
                 for (int ty = minTileY; ty <= maxTileY; ++ty)
                 {
                     for (int tx = minTileX; tx <= maxTileX; ++tx)
@@ -1696,11 +1728,11 @@ public:
                         // compute per-subtile coverage using same repo-like edge test
                         int baseX = tx * TILE_WIDTH;
                         int baseY = ty * TILE_HEIGHT;
-
-                        for (int lane = 0; lane < 4; ++lane)
+                        lanes=4;
+                        for (int lane = 0; lane < lanes; ++lane)
                         {
-                            int sx = baseX + (lane % 4) * SUB_TILE_WIDTH;
-                            int sy = baseY + (lane / 4) * SUB_TILE_HEIGHT;
+                            int sx = baseX + (lane % lanes) * SUB_TILE_WIDTH;
+                            int sy = baseY + (lane / lanes) * SUB_TILE_HEIGHT;
 
                             for (int py = 0; py < SUB_TILE_HEIGHT; ++py)
                             {
@@ -1709,12 +1741,12 @@ public:
                                     float x = (float)(sx + px) + 0.5f;
                                     float y = (float)(sy + py) + 0.5f;
 
-                                    float v0x = simd_f32(pVtxX[0])[triIdx];
-                                    float v0y = simd_f32(pVtxY[0])[triIdx];
-                                    float v1x = simd_f32(pVtxX[1])[triIdx];
-                                    float v1y = simd_f32(pVtxY[1])[triIdx];
-                                    float v2x = simd_f32(pVtxX[2])[triIdx];
-                                    float v2y = simd_f32(pVtxY[2])[triIdx];
+                                    // float v0x = simd_f32(pVtxX[0])[triIdx];
+                                    // float v0y = simd_f32(pVtxY[0])[triIdx];
+                                    // float v1x = simd_f32(pVtxX[1])[triIdx];
+                                    // float v1y = simd_f32(pVtxY[1])[triIdx];
+                                    // float v2x = simd_f32(pVtxX[2])[triIdx];
+                                    // float v2y = simd_f32(pVtxY[2])[triIdx];
 
                                     float e0 = (x - v0x) * (v1y - v0y) - (y - v0y) * (v1x - v0x);
                                     float e1 = (x - v1x) * (v2y - v1y) - (y - v1y) * (v2x - v1x);
@@ -1728,11 +1760,23 @@ public:
                                         continue;
 
                                     int bit = py * 8 + px;
+                                    const float zFrag = z0 + zDx * (x - v0x) + zDy * (y - v0y);
+                                    const int depthLayer =
+                                        (simd_i32(mMaskedHiZBuffer[tileIdx].mMask)[lane] >> bit) & 1;
+                                    const float zStored =
+                                        simd_f32(mMaskedHiZBuffer[tileIdx].mZMin[depthLayer])[lane];
+                                    if (zFrag < zStored)
+                                        continue;
+
                                     simd_i32(coverage)[lane] |= (1u << bit);
                                 }
                             }
                         }
-
+                        if (stencilPortalMask != nullptr)
+                        {
+                            const __mwi stencil = _mmw_loadu_epi32(stencilPortalMask + tileIdx * lanes);
+                            coverage = _mmw_and_epi32(coverage, stencil);
+                        }
                         // Coverage-only hierarchy: OR the result into the portal tile mask.
                         mPortalMaskBuffer[tileIdx].mMask = _mmw_or_epi32(mPortalMaskBuffer[tileIdx].mMask, coverage);
                     }

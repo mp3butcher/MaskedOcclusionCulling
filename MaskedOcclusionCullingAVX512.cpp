@@ -56,6 +56,11 @@
 // AVX specific typedefs and functions
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+#define _mmw_set1_epi32             _mm512_set1_epi32
+#define _mmw_loadu_epi32(a)         _mm512_loadu_si512((const void *)(a))
+#define _mmw_setzero_epi32          _mm512_setzero_si512
+#define _mmw_and_epi32              _mm512_and_si512
+
 typedef __m512 __mw;
 typedef __m512i __mwi;
 
