@@ -123,8 +123,14 @@ public:
     {
         __mwi mMask; // 4x8x4 subtile coverage mask for one tile
     };
-
+    struct PortalHierarchyNode
+    {
+        unsigned int mActive; // 1 if any child tile in the 2x2 group has coverage
+    };
     PortalTile *mPortalMaskBuffer;
+    PortalHierarchyNode *mPortalTileHierarchy;
+    int mPortalHierarchyWidth;
+    int mPortalHierarchyHeight;
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 	// Member variables
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -153,7 +159,10 @@ public:
 
 	MaskedOcclusionCullingPrivate(pfnAlignedAlloc alignedAlloc, pfnAlignedFree alignedFree) : 
 	mFullscreenScissor(0, 0, 0, 0),
-        mPortalMaskBuffer(nullptr)
+        mPortalMaskBuffer(nullptr),
+        mPortalTileHierarchy(nullptr),
+        mPortalHierarchyWidth(0),
+        mPortalHierarchyHeight(0)
 	{
 		mMaskedHiZBuffer = nullptr;
 		mAlignedAllocCallback = alignedAlloc;
@@ -183,16 +192,36 @@ public:
         if (mPortalMaskBuffer != nullptr)
             mAlignedFreeCallback(mPortalMaskBuffer);
         mPortalMaskBuffer = nullptr;
+
+        if (mPortalTileHierarchy != nullptr)
+            mAlignedFreeCallback(mPortalTileHierarchy);
+        mPortalTileHierarchy = nullptr;
 #if MOC_RECORDER_ENABLE
         assert( mRecorder == nullptr ); // forgot to call StopRecording()?
 #endif
 	}
 
     // Clears the 1-bit portal buffer.
-    void ClearPortalBuffer() override
+    FORCE_INLINE void ClearPortalBuffer() override
     {
         for (int i = 0; i < mTilesWidth * mTilesHeight; ++i)
             mPortalMaskBuffer[i].mMask = _mmw_setzero_epi32();
+        for (int i = 0; i < mPortalHierarchyWidth * mPortalHierarchyHeight; ++i)
+            mPortalTileHierarchy[i].mActive = 0;
+    }
+
+    FORCE_INLINE int PortalHierarchyIndex(int tileX, int tileY) const
+    {
+        return (tileY >> 1) * mPortalHierarchyWidth + (tileX >> 1);
+    }
+
+    FORCE_INLINE void UpdatePortalHierarchy(int tileIdx)
+    {
+        const int tileX = tileIdx % mTilesWidth;
+        const int tileY = tileIdx / mTilesWidth;
+        const int parentIdx = PortalHierarchyIndex(tileX, tileY);
+        if (parentIdx >= 0 && parentIdx < mPortalHierarchyWidth * mPortalHierarchyHeight)
+            mPortalTileHierarchy[parentIdx].mActive = 1;
     }
 
     void SetResolution(unsigned int width, unsigned int height) override
@@ -251,9 +280,17 @@ public:
             mAlignedFreeCallback(mPortalMaskBuffer);
 
         mPortalMaskBuffer = (PortalTile *)mAlignedAllocCallback(64, sizeof(PortalTile) * mTilesWidth * mTilesHeight);
+        mPortalHierarchyWidth  = (mTilesWidth + 1) >> 1;
+        mPortalHierarchyHeight = (mTilesHeight + 1) >> 1;
+
+        if (mPortalTileHierarchy)
+            mAlignedFreeCallback(mPortalTileHierarchy);
+        mPortalTileHierarchy = (PortalHierarchyNode *)mAlignedAllocCallback(64, sizeof(PortalHierarchyNode) * mPortalHierarchyWidth * mPortalHierarchyHeight);
 
         for (int i = 0; i < mTilesWidth * mTilesHeight; ++i)
             mPortalMaskBuffer[i].mMask = _mmw_setzero_epi32();
+        for (int i = 0; i < mPortalHierarchyWidth * mPortalHierarchyHeight; ++i)
+            mPortalTileHierarchy[i].mActive = 0;
         ClearPortalBuffer();
     }
 
@@ -1566,14 +1603,6 @@ public:
     }
     FORCE_INLINE bool TestRectAgainstPortalBuffer(float xmin, float ymin, float xmax, float ymax) const override
     {
-        if (mPortalMaskBuffer == nullptr)
-            return false;
-
-        // if (xmax < xmin)
-        //     std::swap(xmin, xmax);
-        // if (ymax < ymin)
-        //     std::swap(ymin, ymax);
-
         // Convert NDC rect to screen-space pixel rect using the repo convention.
         // This matches the same transform used in TestRect().
 #if USE_D3D != 0
@@ -1604,20 +1633,48 @@ public:
         const int tyMin = clampedMinY / TILE_HEIGHT;
         const int tyMax = clampedMaxY / TILE_HEIGHT;
 
-        for (int ty = tyMin; ty <= tyMax; ++ty)
+        //for (int ty = tyMin; ty <= tyMax; ++ty)
+        const int groupMinX = txMin >> 1;
+        const int groupMaxX = txMax >> 1;
+        const int groupMinY = tyMin >> 1;
+        const int groupMaxY = tyMax >> 1;
+
+        for (int gy = groupMinY; gy <= groupMaxY; ++gy)
         {
-            for (int tx = txMin; tx <= txMax; ++tx)
+            //for (int tx = txMin; tx <= txMax; ++tx)
+            for (int gx = groupMinX; gx <= groupMaxX; ++gx)
             {
-                const int tileIdx = ty * mTilesWidth + tx;
+                // const int tileIdx = ty * mTilesWidth + tx;
 
-                __mwi rectMask = BuildRectCoverageMaskForTile(tx, ty, clampedMinX, clampedMinY, clampedMaxX, clampedMaxY);
-                __mwi overlap = _mmw_and_epi32(rectMask, mPortalMaskBuffer[tileIdx].mMask);
+                // __mwi rectMask = BuildRectCoverageMaskForTile(tx, ty, clampedMinX, clampedMinY, clampedMaxX, clampedMaxY);
+                // __mwi overlap = _mmw_and_epi32(rectMask, mPortalMaskBuffer[tileIdx].mMask);
 
-                if (!_mmw_testz_epi32(overlap, overlap))
-                    return true;
+                // if (!_mmw_testz_epi32(overlap, overlap))
+                //     return true;
+                const int parentIdx = gy * mPortalHierarchyWidth + gx;
+                if (mPortalTileHierarchy[parentIdx].mActive == 0)
+                    continue;
+
+                const int startTx = max(txMin, gx << 1);
+                const int endTx = min(txMax, (gx << 1) + 1);
+                const int startTy = max(tyMin, gy << 1);
+                const int endTy = min(tyMax, (gy << 1) + 1);
+
+                for (int ty = startTy; ty <= endTy; ++ty)
+                {
+                    for (int tx = startTx; tx <= endTx; ++tx)
+                    {
+                        const int tileIdx = ty * mTilesWidth + tx;
+
+                        __mwi rectMask = BuildRectCoverageMaskForTile(tx, ty, clampedMinX, clampedMinY, clampedMaxX, clampedMaxY);
+                        __mwi overlap = _mmw_and_epi32(rectMask, mPortalMaskBuffer[tileIdx].mMask);
+
+                        if (!_mmw_testz_epi32(overlap, overlap))
+                            return true;
+                    }
+                }
             }
         }
-
         return false;
     }
 
@@ -1779,6 +1836,8 @@ public:
                         }
                         // Coverage-only hierarchy: OR the result into the portal tile mask.
                         mPortalMaskBuffer[tileIdx].mMask = _mmw_or_epi32(mPortalMaskBuffer[tileIdx].mMask, coverage);
+                        if (!_mmw_testz_epi32(mPortalMaskBuffer[tileIdx].mMask, mPortalMaskBuffer[tileIdx].mMask))
+                            UpdatePortalHierarchy(tileIdx);
                     }
                 }
             }
