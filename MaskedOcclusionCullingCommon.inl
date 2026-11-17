@@ -1534,7 +1534,7 @@ public:
     {
         __mwi mask = _mmw_setzero_epi32();
 
-        for (int lane = 0; lane < 4; ++lane)
+        for (int lane = 0; lane < SIMD_LANES; ++lane)
         {
             const int sx = tileX * TILE_WIDTH + (lane % 4) * SUB_TILE_WIDTH;
             const int sy = tileY * TILE_HEIGHT + (lane / 4) * SUB_TILE_HEIGHT;
@@ -1728,11 +1728,11 @@ public:
                         // compute per-subtile coverage using same repo-like edge test
                         int baseX = tx * TILE_WIDTH;
                         int baseY = ty * TILE_HEIGHT;
-                        lanes=4;
-                        for (int lane = 0; lane < lanes; ++lane)
+
+                        for (int lane = 0; lane < SIMD_LANES; ++lane)
                         {
-                            int sx = baseX + (lane % lanes) * SUB_TILE_WIDTH;
-                            int sy = baseY + (lane / lanes) * SUB_TILE_HEIGHT;
+                            int sx = baseX + (lane % 4) * SUB_TILE_WIDTH;
+                            int sy = baseY + (lane / 4) * SUB_TILE_HEIGHT;
 
                             for (int py = 0; py < SUB_TILE_HEIGHT; ++py)
                             {
@@ -1774,7 +1774,7 @@ public:
                         }
                         if (stencilPortalMask != nullptr)
                         {
-                            const __mwi stencil = _mmw_loadu_epi32(stencilPortalMask + tileIdx * lanes);
+                            const __mwi stencil = _mmw_loadu_epi32(stencilPortalMask + tileIdx * SIMD_LANES);
                             coverage = _mmw_and_epi32(coverage, stencil);
                         }
                         // Coverage-only hierarchy: OR the result into the portal tile mask.
